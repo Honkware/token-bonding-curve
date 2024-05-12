@@ -71,9 +71,6 @@ pub enum SwapError {
     /// The pool token mint has a freeze authority.
     #[error("Pool token mint has a freeze authority")]
     InvalidFreezeAuthority,
-    /// The pool fee token account is incorrect
-    #[error("Pool fee token account incorrect")]
-    IncorrectFeeAccount,
 
     // 20.
     /// Given pool token amount results in zero trading tokens

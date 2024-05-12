@@ -7,7 +7,10 @@
 //! since we don't need those (could add them back in if we did more testing around precision)
 
 use spl_math::uint::U256;
-
+use crate::curve::fees::Fees;
+use crate::curve::constant_product::ConstantProductCurve;
+use crate::curve::base::SwapCurve;
+use crate::curve::base::CurveType;
 // Allows for easy swapping between different internal representations
 type InnerUint = U256;
 
@@ -322,9 +325,42 @@ impl DFSPreciseNumber {
 
 #[cfg(test)]
 mod tests {
+    use crate::curve::calculator::TradeDirection;
+
     use super::*;
     use solana_program::msg;
+    #[test]
+    fn constant_product_owner_fee() {
+        let swap_source_amount = 1000;
+        let swap_destination_amount = 50000;
+        let owner_trade_fee_numerator = 1;
+        let owner_trade_fee_denominator = 100;
+        let fees = Fees {
+            owner_trade_fee_numerator,
+            owner_trade_fee_denominator,
+        };
+        let source_amount: u128 = 100;
+        let curve = ConstantProductCurve {};
+        let swap_curve = SwapCurve {
+            curve_type: CurveType::ConstantProduct,
+            calculator: Box::new(curve),
+        };
+        let result = swap_curve
+            .swap(
+                source_amount,
+                swap_source_amount,
+                swap_destination_amount,
+                TradeDirection::AtoB,
+                &fees,
+            )
+            .unwrap();
+        assert_eq!(result.new_swap_source_amount, 1100);
+        assert_eq!(result.destination_amount_swapped, 4504);
+        assert_eq!(result.new_swap_destination_amount, 45496);
+        assert_eq!(result.owner_fee, 1);
+    }
 
+    
     #[test]
     fn test_to_imprecise() {
         let number = DFSPreciseNumber::new(0).unwrap();

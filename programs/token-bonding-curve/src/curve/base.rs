@@ -51,8 +51,6 @@ pub struct SwapResult {
     pub source_amount_swapped: u128,
     /// Amount of destination token swapped
     pub destination_amount_swapped: u128,
-    /// Amount of source tokens going to pool holders
-    pub trade_fee: u128,
     /// Amount of source tokens going to owner
     pub owner_fee: u128,
 }
@@ -80,12 +78,10 @@ impl SwapCurve {
         trade_direction: TradeDirection,
         fees: &Fees,
     ) -> Option<SwapResult> {
-        // debit the fee to calculate the amount swapped
-        let trade_fee = fees.trading_fee(source_amount)?;
-        let owner_fee = fees.owner_trading_fee(source_amount)?;
+        // debit the owner fee to calculate the amount swapped
+        let owner_fee = fees.owner_trading_fee(source_amount.try_into().unwrap())?;
 
-        let total_fees = trade_fee.checked_add(owner_fee)?;
-        let source_amount_less_fees = source_amount.checked_sub(total_fees)?;
+        let source_amount_less_fees = source_amount.checked_sub(owner_fee.into())?;
 
         let SwapWithoutFeesResult {
             source_amount_swapped,
@@ -97,15 +93,14 @@ impl SwapCurve {
             trade_direction,
         )?;
 
-        let source_amount_swapped = source_amount_swapped.checked_add(total_fees)?;
+        let source_amount_swapped = source_amount_swapped.checked_add(owner_fee.into())?;
         Some(SwapResult {
             new_swap_source_amount: swap_source_amount.checked_add(source_amount_swapped)?,
             new_swap_destination_amount: swap_destination_amount
                 .checked_sub(destination_amount_swapped)?,
             source_amount_swapped,
             destination_amount_swapped,
-            trade_fee,
-            owner_fee,
+            owner_fee: owner_fee.into(),
         })
     }
 
@@ -122,12 +117,12 @@ impl SwapCurve {
         if source_amount == 0 {
             return Some(0);
         }
-        // Get the trading fee incurred if *half* the source amount is swapped
+        // Get the owner fee incurred if *half* the source amount is swapped
         // for the other side. Reference at:
         // https://github.com/balancer-labs/balancer-core/blob/f4ed5d65362a8d6cec21662fb6eae233b0babc1f/contracts/BMath.sol#L117
         let half_source_amount = std::cmp::max(1, source_amount.checked_div(2)?);
-        let trade_fee = fees.trading_fee(half_source_amount)?;
-        let source_amount = source_amount.checked_sub(trade_fee)?;
+        let owner_fee = fees.owner_trading_fee(half_source_amount.try_into().unwrap())?;
+        let source_amount = source_amount.checked_sub(owner_fee.into())?;
         self.calculator.deposit_single_token_type(
             source_amount,
             swap_token_a_amount,
@@ -150,12 +145,12 @@ impl SwapCurve {
         if source_amount == 0 {
             return Some(0);
         }
-        // Get the trading fee incurred if *half* the source amount is swapped
+        // Get the owner fee incurred if *half* the source amount is swapped
         // for the other side. Reference at:
         // https://github.com/balancer-labs/balancer-core/blob/f4ed5d65362a8d6cec21662fb6eae233b0babc1f/contracts/BMath.sol#L117
         let half_source_amount = std::cmp::max(1, source_amount.checked_div(2)?);
-        let trade_fee = fees.trading_fee(half_source_amount)?;
-        let source_amount = source_amount.checked_sub(trade_fee)?;
+        let owner_fee = fees.owner_trading_fee(half_source_amount.try_into().unwrap())?;
+        let source_amount = source_amount.checked_sub(owner_fee.into())?;
         self.calculator.withdraw_single_token_type_exact_out(
             source_amount,
             swap_token_a_amount,
@@ -207,8 +202,8 @@ impl Sealed for SwapCurve {}
 impl Pack for SwapCurve {
     /// Size of encoding of all curve parameters, which include fees and any other
     /// constants used to calculate swaps, deposits, and withdrawals.
-    /// This includes 1 byte for the type, and 72 for the calculator to use as
-    /// it needs.  Some calculators may be smaller than 72 bytes.
+    /// This includes 1 byte for the type, and 32 for the calculator to use as
+    /// it needs.  Some calculators may be smaller than 32 bytes.
     const LEN: usize = 33;
 
     /// Unpacks a byte buffer into a SwapCurve
@@ -292,73 +287,14 @@ mod tests {
     }
 
     #[test]
-    fn constant_product_trade_fee() {
-        // calculation on https://github.com/solana-labs/solana-program-library/issues/341
-        let swap_source_amount = 1000;
-        let swap_destination_amount = 50000;
-        let trade_fee_numerator = 1;
-        let trade_fee_denominator = 100;
-        let owner_trade_fee_numerator = 0;
-        let owner_trade_fee_denominator = 0;
-        let owner_withdraw_fee_numerator = 0;
-        let owner_withdraw_fee_denominator = 0;
-        let host_fee_numerator = 0;
-        let host_fee_denominator = 0;
-
-        let fees = Fees {
-            trade_fee_numerator,
-            trade_fee_denominator,
-            owner_trade_fee_numerator,
-            owner_trade_fee_denominator,
-            owner_withdraw_fee_numerator,
-            owner_withdraw_fee_denominator,
-            host_fee_numerator,
-            host_fee_denominator,
-        };
-        let source_amount = 100;
-        let curve = ConstantProductCurve {};
-        let swap_curve = SwapCurve {
-            curve_type: CurveType::ConstantProduct,
-            calculator: Box::new(curve),
-        };
-        let result = swap_curve
-            .swap(
-                source_amount,
-                swap_source_amount,
-                swap_destination_amount,
-                TradeDirection::AtoB,
-                &fees,
-            )
-            .unwrap();
-        assert_eq!(result.new_swap_source_amount, 1100);
-        assert_eq!(result.destination_amount_swapped, 4504);
-        assert_eq!(result.new_swap_destination_amount, 45496);
-        assert_eq!(result.trade_fee, 1);
-        assert_eq!(result.owner_fee, 0);
-    }
-
-    #[test]
     fn constant_product_owner_fee() {
-        // calculation on https://github.com/solana-labs/solana-program-library/issues/341
         let swap_source_amount = 1000;
         let swap_destination_amount = 50000;
-        let trade_fee_numerator = 0;
-        let trade_fee_denominator = 0;
         let owner_trade_fee_numerator = 1;
         let owner_trade_fee_denominator = 100;
-        let owner_withdraw_fee_numerator = 0;
-        let owner_withdraw_fee_denominator = 0;
-        let host_fee_numerator = 0;
-        let host_fee_denominator = 0;
         let fees = Fees {
-            trade_fee_numerator,
-            trade_fee_denominator,
             owner_trade_fee_numerator,
             owner_trade_fee_denominator,
-            owner_withdraw_fee_numerator,
-            owner_withdraw_fee_denominator,
-            host_fee_numerator,
-            host_fee_denominator,
         };
         let source_amount: u128 = 100;
         let curve = ConstantProductCurve {};
@@ -378,7 +314,6 @@ mod tests {
         assert_eq!(result.new_swap_source_amount, 1100);
         assert_eq!(result.destination_amount_swapped, 4504);
         assert_eq!(result.new_swap_destination_amount, 45496);
-        assert_eq!(result.trade_fee, 0);
         assert_eq!(result.owner_fee, 1);
     }
 

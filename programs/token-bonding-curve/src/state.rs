@@ -30,9 +30,6 @@ pub trait SwapState {
     /// Address of token B mint
     fn token_b_mint(&self) -> &Pubkey;
 
-    /// Address of pool fee account
-    fn pool_fee_account(&self) -> &Pubkey;
-
     /// Fees associated with swap
     fn fees(&self) -> &Fees;
     /// Curve associated with swap
@@ -115,9 +112,6 @@ pub struct SwapV1 {
     /// Mint information for token B
     pub token_b_mint: Pubkey,
 
-    /// Pool token account to receive trading and / or withdrawal fees
-    pub pool_fee_account: Pubkey,
-
     /// All fee information
     pub fees: Fees,
 
@@ -159,10 +153,6 @@ impl SwapState for SwapV1 {
         &self.token_b_mint
     }
 
-    fn pool_fee_account(&self) -> &Pubkey {
-        &self.pool_fee_account
-    }
-
     fn fees(&self) -> &Fees {
         &self.fees
     }
@@ -180,10 +170,10 @@ impl IsInitialized for SwapV1 {
 }
 
 impl Pack for SwapV1 {
-    const LEN: usize = 323;
+    const LEN: usize = 291;
 
     fn pack_into_slice(&self, output: &mut [u8]) {
-        let output = array_mut_ref![output, 0, 323];
+        let output = array_mut_ref![output, 0, 243];
         let (
             is_initialized,
             bump_seed,
@@ -193,10 +183,9 @@ impl Pack for SwapV1 {
             pool_mint,
             token_a_mint,
             token_b_mint,
-            pool_fee_account,
             fees,
             swap_curve,
-        ) = mut_array_refs![output, 1, 1, 32, 32, 32, 32, 32, 32, 32, 64, 33];
+        ) = mut_array_refs![output, 1, 1, 32, 32, 32, 32, 32, 32, 16, 33];
         is_initialized[0] = self.is_initialized as u8;
         bump_seed[0] = self.bump_seed;
         token_program_id.copy_from_slice(self.token_program_id.as_ref());
@@ -205,14 +194,13 @@ impl Pack for SwapV1 {
         pool_mint.copy_from_slice(self.pool_mint.as_ref());
         token_a_mint.copy_from_slice(self.token_a_mint.as_ref());
         token_b_mint.copy_from_slice(self.token_b_mint.as_ref());
-        pool_fee_account.copy_from_slice(self.pool_fee_account.as_ref());
         self.fees.pack_into_slice(&mut fees[..]);
         self.swap_curve.pack_into_slice(&mut swap_curve[..]);
     }
 
     /// Unpacks a byte buffer into a [SwapV1](struct.SwapV1.html).
     fn unpack_from_slice(input: &[u8]) -> Result<Self, ProgramError> {
-        let input = array_ref![input, 0, 323];
+        let input = array_ref![input, 0, 243];
         #[allow(clippy::ptr_offset_with_cast)]
         let (
             is_initialized,
@@ -223,10 +211,9 @@ impl Pack for SwapV1 {
             pool_mint,
             token_a_mint,
             token_b_mint,
-            pool_fee_account,
             fees,
             swap_curve,
-        ) = array_refs![input, 1, 1, 32, 32, 32, 32, 32, 32, 32, 64, 33];
+        ) = array_refs![input, 1, 1, 32, 32, 32, 32, 32, 32, 16, 33];
         Ok(Self {
             is_initialized: match is_initialized {
                 [0] => false,
@@ -240,7 +227,6 @@ impl Pack for SwapV1 {
             pool_mint: Pubkey::new_from_array(*pool_mint),
             token_a_mint: Pubkey::new_from_array(*token_a_mint),
             token_b_mint: Pubkey::new_from_array(*token_b_mint),
-            pool_fee_account: Pubkey::new_from_array(*pool_fee_account),
             fees: Fees::unpack_from_slice(fees)?,
             swap_curve: SwapCurve::unpack_from_slice(swap_curve)?,
         })
@@ -255,14 +241,8 @@ mod tests {
     use std::convert::TryInto;
 
     const TEST_FEES: Fees = Fees {
-        trade_fee_numerator: 1,
-        trade_fee_denominator: 4,
-        owner_trade_fee_numerator: 3,
-        owner_trade_fee_denominator: 10,
-        owner_withdraw_fee_numerator: 2,
-        owner_withdraw_fee_denominator: 7,
-        host_fee_numerator: 5,
-        host_fee_denominator: 20,
+        owner_trade_fee_numerator: 1,
+        owner_trade_fee_denominator: 100,
     };
 
     const TEST_BUMP_SEED: u8 = 255;
@@ -272,7 +252,7 @@ mod tests {
     const TEST_POOL_MINT: Pubkey = Pubkey::new_from_array([4u8; 32]);
     const TEST_TOKEN_A_MINT: Pubkey = Pubkey::new_from_array([5u8; 32]);
     const TEST_TOKEN_B_MINT: Pubkey = Pubkey::new_from_array([6u8; 32]);
-    const TEST_POOL_FEE_ACCOUNT: Pubkey = Pubkey::new_from_array([7u8; 32]);
+
 
     const TEST_CURVE_TYPE: u8 = 2;
     const TEST_AMP: u64 = 1;
@@ -295,7 +275,6 @@ mod tests {
             pool_mint: TEST_POOL_MINT,
             token_a_mint: TEST_TOKEN_A_MINT,
             token_b_mint: TEST_TOKEN_B_MINT,
-            pool_fee_account: TEST_POOL_FEE_ACCOUNT,
             fees: TEST_FEES,
             swap_curve: swap_curve.clone(),
         });
@@ -312,7 +291,6 @@ mod tests {
         assert_eq!(*unpacked.pool_mint(), TEST_POOL_MINT);
         assert_eq!(*unpacked.token_a_mint(), TEST_TOKEN_A_MINT);
         assert_eq!(*unpacked.token_b_mint(), TEST_TOKEN_B_MINT);
-        assert_eq!(*unpacked.pool_fee_account(), TEST_POOL_FEE_ACCOUNT);
         assert_eq!(*unpacked.fees(), TEST_FEES);
         assert_eq!(*unpacked.swap_curve(), swap_curve);
     }
@@ -334,7 +312,6 @@ mod tests {
             pool_mint: TEST_POOL_MINT,
             token_a_mint: TEST_TOKEN_A_MINT,
             token_b_mint: TEST_TOKEN_B_MINT,
-            pool_fee_account: TEST_POOL_FEE_ACCOUNT,
             fees: TEST_FEES,
             swap_curve,
         };
@@ -351,15 +328,8 @@ mod tests {
         packed.extend_from_slice(&TEST_POOL_MINT.to_bytes());
         packed.extend_from_slice(&TEST_TOKEN_A_MINT.to_bytes());
         packed.extend_from_slice(&TEST_TOKEN_B_MINT.to_bytes());
-        packed.extend_from_slice(&TEST_POOL_FEE_ACCOUNT.to_bytes());
-        packed.extend_from_slice(&TEST_FEES.trade_fee_numerator.to_le_bytes());
-        packed.extend_from_slice(&TEST_FEES.trade_fee_denominator.to_le_bytes());
         packed.extend_from_slice(&TEST_FEES.owner_trade_fee_numerator.to_le_bytes());
         packed.extend_from_slice(&TEST_FEES.owner_trade_fee_denominator.to_le_bytes());
-        packed.extend_from_slice(&TEST_FEES.owner_withdraw_fee_numerator.to_le_bytes());
-        packed.extend_from_slice(&TEST_FEES.owner_withdraw_fee_denominator.to_le_bytes());
-        packed.extend_from_slice(&TEST_FEES.host_fee_numerator.to_le_bytes());
-        packed.extend_from_slice(&TEST_FEES.host_fee_denominator.to_le_bytes());
         packed.push(TEST_CURVE_TYPE);
         packed.extend_from_slice(&TEST_AMP.to_le_bytes());
         packed.extend_from_slice(&[0u8; 24]);

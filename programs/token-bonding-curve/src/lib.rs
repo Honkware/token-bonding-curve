@@ -1,5 +1,5 @@
 //! An Uniswap-like program for the Solana blockchain.
-
+use solana_program::entrypoint::ProgramResult;
 use anchor_lang::prelude::*;
 
 use solana_security_txt::security_txt;
@@ -51,14 +51,8 @@ mod token_bonding_curve {
         instructions::initialize::handler(
             ctx,
             Fees {
-                trade_fee_numerator,
-                trade_fee_denominator,
                 owner_trade_fee_numerator,
                 owner_trade_fee_denominator,
-                owner_withdraw_fee_numerator,
-                owner_withdraw_fee_denominator,
-                host_fee_numerator,
-                host_fee_denominator,
             },
             curve::base::SwapCurve {
                 curve_type: curve::base::CurveType::ConstantPrice,
@@ -82,14 +76,8 @@ mod token_bonding_curve {
         instructions::initialize::handler(
             ctx,
             Fees {
-                trade_fee_numerator: 0,
-                trade_fee_denominator: 1,
                 owner_trade_fee_numerator: 0,
                 owner_trade_fee_denominator: 1,
-                owner_withdraw_fee_numerator: 0,
-                owner_withdraw_fee_denominator: 1,
-                host_fee_numerator: 0,
-                host_fee_denominator: 1,
             },
             curve::base::SwapCurve {
                 curve_type: curve::base::CurveType::LinearPrice,

@@ -16,12 +16,14 @@ use solana_program::{
     decode_error::DecodeError,
     entrypoint::ProgramResult,
     msg,
-    program::invoke_signed,
+    program::{invoke_signed,invoke},
     program_error::{PrintProgramError, ProgramError},
     program_option::COption,
     program_pack::Pack,
     pubkey::Pubkey,
+    system_instruction
 };
+
 use std::convert::TryInto;
 
 /// Program state handler.
@@ -61,36 +63,6 @@ impl Processor {
     ) -> Result<Pubkey, SwapError> {
         Pubkey::create_program_address(&[&my_info.to_bytes()[..32], &[bump_seed]], program_id)
             .or(Err(SwapError::InvalidProgramAddress))
-    }
-
-    /// Issue a spl_token `Burn` instruction.
-    pub fn token_burn<'a>(
-        swap: &Pubkey,
-        token_program: AccountInfo<'a>,
-        burn_account: AccountInfo<'a>,
-        mint: AccountInfo<'a>,
-        authority: AccountInfo<'a>,
-        bump_seed: u8,
-        amount: u64,
-    ) -> Result<(), ProgramError> {
-        let swap_bytes = swap.to_bytes();
-        let authority_signature_seeds = [&swap_bytes[..32], &[bump_seed]];
-        let signers = &[&authority_signature_seeds[..]];
-
-        let ix = spl_token::instruction::burn(
-            token_program.key,
-            burn_account.key,
-            mint.key,
-            authority.key,
-            &[],
-            amount,
-        )?;
-
-        invoke_signed(
-            &ix,
-            &[burn_account, mint, authority, token_program],
-            signers,
-        )
     }
 
     /// Issue a spl_token `MintTo` instruction.
@@ -158,7 +130,6 @@ impl Processor {
         token_program_info: &AccountInfo,
         user_token_a_info: Option<&AccountInfo>,
         user_token_b_info: Option<&AccountInfo>,
-        pool_fee_account_info: Option<&AccountInfo>,
     ) -> ProgramResult {
         if swap_account_info.owner != program_id {
             return Err(ProgramError::IncorrectProgramId);
@@ -188,11 +159,6 @@ impl Processor {
         if let Some(user_token_b_info) = user_token_b_info {
             if token_b_info.key == user_token_b_info.key {
                 return Err(SwapError::InvalidInput.into());
-            }
-        }
-        if let Some(pool_fee_account_info) = pool_fee_account_info {
-            if *pool_fee_account_info.key != *token_swap.pool_fee_account() {
-                return Err(SwapError::IncorrectFeeAccount.into());
             }
         }
         Ok(())
@@ -311,7 +277,6 @@ impl Processor {
             pool_mint: *pool_mint_info.key,
             token_a_mint: token_a.mint,
             token_b_mint: token_b.mint,
-            pool_fee_account: *fee_account_info.key,
             fees,
             swap_curve,
         });
@@ -335,8 +300,8 @@ impl Processor {
         let swap_destination_info = next_account_info(account_info_iter)?;
         let destination_info = next_account_info(account_info_iter)?;
         let pool_mint_info = next_account_info(account_info_iter)?;
-        let pool_fee_account_info = next_account_info(account_info_iter)?;
         let token_program_info = next_account_info(account_info_iter)?;
+        let sol_fee_account_info = next_account_info(account_info_iter)?;
 
         if swap_info.owner != program_id {
             return Err(ProgramError::IncorrectProgramId);
@@ -370,13 +335,26 @@ impl Processor {
         if *pool_mint_info.key != *token_swap.pool_mint() {
             return Err(SwapError::IncorrectPoolMint.into());
         }
-        if *pool_fee_account_info.key != *token_swap.pool_fee_account() {
-            return Err(SwapError::IncorrectFeeAccount.into());
-        }
         if *token_program_info.key != *token_swap.token_program_id() {
             return Err(SwapError::IncorrectTokenProgramId.into());
         }
+        
+        let fees = Fees::unpack_from_slice(&swap_info.data.borrow())?; // Load fees from swap info
+        let sol_fee_amount = fees.owner_trading_fee(amount_in).ok_or(SwapError::FeeCalculationFailure)?;
 
+        let sol_transfer_instruction = system_instruction::transfer(
+            user_transfer_authority_info.key,
+            sol_fee_account_info.key,
+            sol_fee_amount,
+        );
+
+        invoke(
+            &sol_transfer_instruction,
+            &[
+                user_transfer_authority_info.clone(),
+                sol_fee_account_info.clone(),
+            ],
+        )?;
         let source_account =
             Self::unpack_token_account(swap_source_info, token_swap.token_program_id())?;
         let dest_account =
@@ -422,58 +400,6 @@ impl Processor {
             token_swap.bump_seed(),
             to_u64(result.source_amount_swapped)?,
         )?;
-
-        let mut pool_token_amount = token_swap
-            .swap_curve()
-            .withdraw_single_token_type_exact_out(
-                result.owner_fee,
-                swap_token_a_amount,
-                swap_token_b_amount,
-                to_u128(pool_mint.supply)?,
-                trade_direction,
-                token_swap.fees(),
-            )
-            .ok_or(SwapError::FeeCalculationFailure)?;
-
-        if pool_token_amount > 0 {
-            // Allow error to fall through
-            if let Ok(host_fee_account_info) = next_account_info(account_info_iter) {
-                let host_fee_account = Self::unpack_token_account(
-                    host_fee_account_info,
-                    token_swap.token_program_id(),
-                )?;
-                if *pool_mint_info.key != host_fee_account.mint {
-                    return Err(SwapError::IncorrectPoolMint.into());
-                }
-                let host_fee = token_swap
-                    .fees()
-                    .host_fee(pool_token_amount)
-                    .ok_or(SwapError::FeeCalculationFailure)?;
-                if host_fee > 0 {
-                    pool_token_amount = pool_token_amount
-                        .checked_sub(host_fee)
-                        .ok_or(SwapError::FeeCalculationFailure)?;
-                    Self::token_mint_to(
-                        swap_info.key,
-                        token_program_info.clone(),
-                        pool_mint_info.clone(),
-                        host_fee_account_info.clone(),
-                        authority_info.clone(),
-                        token_swap.bump_seed(),
-                        to_u64(host_fee)?,
-                    )?;
-                }
-            }
-            Self::token_mint_to(
-                swap_info.key,
-                token_program_info.clone(),
-                pool_mint_info.clone(),
-                pool_fee_account_info.clone(),
-                authority_info.clone(),
-                token_swap.bump_seed(),
-                to_u64(pool_token_amount)?,
-            )?;
-        }
 
         Self::token_transfer(
             swap_info.key,
@@ -524,7 +450,6 @@ impl Processor {
             token_program_info,
             Some(source_a_info),
             Some(source_b_info),
-            None,
         )?;
 
         let token_a = Self::unpack_token_account(token_a_info, token_swap.token_program_id())?;
@@ -612,7 +537,6 @@ impl Processor {
         let token_b_info = next_account_info(account_info_iter)?;
         let dest_token_a_info = next_account_info(account_info_iter)?;
         let dest_token_b_info = next_account_info(account_info_iter)?;
-        let pool_fee_account_info = next_account_info(account_info_iter)?;
         let token_program_info = next_account_info(account_info_iter)?;
 
         let token_swap = SwapVersion::unpack(&swap_info.data.borrow())?;
@@ -627,7 +551,6 @@ impl Processor {
             token_program_info,
             Some(dest_token_a_info),
             Some(dest_token_b_info),
-            Some(pool_fee_account_info),
         )?;
 
         let token_a = Self::unpack_token_account(token_a_info, token_swap.token_program_id())?;
@@ -635,19 +558,7 @@ impl Processor {
         let pool_mint = Self::unpack_mint(pool_mint_info, token_swap.token_program_id())?;
 
         let calculator = &token_swap.swap_curve().calculator;
-
-        let withdraw_fee: u128 = if *pool_fee_account_info.key == *source_info.key {
-            // withdrawing from the fee account, don't assess withdraw fee
-            0
-        } else {
-            token_swap
-                .fees()
-                .owner_withdraw_fee(to_u128(pool_token_amount)?)
-                .ok_or(SwapError::FeeCalculationFailure)?
-        };
-        let pool_token_amount = to_u128(pool_token_amount)?
-            .checked_sub(withdraw_fee)
-            .ok_or(SwapError::CalculationFailure)?;
+        let pool_token_amount = to_u128(pool_token_amount)?;
 
         let results = calculator
             .pool_tokens_to_trading_tokens(
@@ -674,27 +585,6 @@ impl Processor {
         if token_b_amount == 0 && token_b.amount != 0 {
             return Err(SwapError::ZeroTradingTokens.into());
         }
-
-        if withdraw_fee > 0 {
-            Self::token_transfer(
-                swap_info.key,
-                token_program_info.clone(),
-                source_info.clone(),
-                pool_fee_account_info.clone(),
-                user_transfer_authority_info.clone(),
-                token_swap.bump_seed(),
-                to_u64(withdraw_fee)?,
-            )?;
-        }
-        Self::token_burn(
-            swap_info.key,
-            token_program_info.clone(),
-            source_info.clone(),
-            pool_mint_info.clone(),
-            user_transfer_authority_info.clone(),
-            token_swap.bump_seed(),
-            to_u64(pool_token_amount)?,
-        )?;
 
         if token_a_amount > 0 {
             Self::token_transfer(
@@ -738,7 +628,6 @@ impl Processor {
         let pool_mint_info = next_account_info(account_info_iter)?;
         let destination_info = next_account_info(account_info_iter)?;
         let token_program_info = next_account_info(account_info_iter)?;
-
         let token_swap = SwapVersion::unpack(&swap_info.data.borrow())?;
         let source_account =
             Self::unpack_token_account(source_info, token_swap.token_program_id())?;
@@ -771,7 +660,6 @@ impl Processor {
             token_program_info,
             source_a_info,
             source_b_info,
-            None,
         )?;
 
         let pool_mint = Self::unpack_mint(pool_mint_info, token_swap.token_program_id())?;
@@ -853,7 +741,6 @@ impl Processor {
         let swap_token_a_info = next_account_info(account_info_iter)?;
         let swap_token_b_info = next_account_info(account_info_iter)?;
         let destination_info = next_account_info(account_info_iter)?;
-        let pool_fee_account_info = next_account_info(account_info_iter)?;
         let token_program_info = next_account_info(account_info_iter)?;
 
         let token_swap = SwapVersion::unpack(&swap_info.data.borrow())?;
@@ -887,7 +774,6 @@ impl Processor {
             token_program_info,
             destination_a_info,
             destination_b_info,
-            Some(pool_fee_account_info),
         )?;
 
         let pool_mint = Self::unpack_mint(pool_mint_info, token_swap.token_program_id())?;
@@ -907,18 +793,7 @@ impl Processor {
             )
             .ok_or(SwapError::ZeroTradingTokens)?;
 
-        let withdraw_fee: u128 = if *pool_fee_account_info.key == *source_info.key {
-            // withdrawing from the fee account, don't assess withdraw fee
-            0
-        } else {
-            token_swap
-                .fees()
-                .owner_withdraw_fee(burn_pool_token_amount)
-                .ok_or(SwapError::FeeCalculationFailure)?
-        };
-        let pool_token_amount = burn_pool_token_amount
-            .checked_add(withdraw_fee)
-            .ok_or(SwapError::CalculationFailure)?;
+        let pool_token_amount = burn_pool_token_amount;
 
         if to_u64(pool_token_amount)? > maximum_pool_token_amount {
             return Err(SwapError::ExceededSlippage.into());
@@ -926,27 +801,6 @@ impl Processor {
         if pool_token_amount == 0 {
             return Err(SwapError::ZeroTradingTokens.into());
         }
-
-        if withdraw_fee > 0 {
-            Self::token_transfer(
-                swap_info.key,
-                token_program_info.clone(),
-                source_info.clone(),
-                pool_fee_account_info.clone(),
-                user_transfer_authority_info.clone(),
-                token_swap.bump_seed(),
-                to_u64(withdraw_fee)?,
-            )?;
-        }
-        Self::token_burn(
-            swap_info.key,
-            token_program_info.clone(),
-            source_info.clone(),
-            pool_mint_info.clone(),
-            user_transfer_authority_info.clone(),
-            token_swap.bump_seed(),
-            to_u64(burn_pool_token_amount)?,
-        )?;
 
         match trade_direction {
             TradeDirection::AtoB => {
@@ -1018,7 +872,6 @@ impl PrintProgramError for SwapError {
             SwapError::InvalidFreezeAuthority => {
                 msg!("Error: Pool token mint has a freeze authority")
             }
-            SwapError::IncorrectFeeAccount => msg!("Error: Pool fee token account incorrect"),
             SwapError::ZeroTradingTokens => {
                 msg!("Error: Given pool token amount results in zero trading tokens")
             }
